@@ -97,12 +97,37 @@ func DialWithKeyWithPassphrase(addr, user, keyfile string, passphrase string) (*
 // Dial starts a client connection to the given SSH server.
 // This wraps ssh.Dial.
 func Dial(network, addr string, config *ssh.ClientConfig) (*Client, error) {
-	sshClient, err := ssh.Dial(network, addr, config)
+	sshClient, err := dial(network, addr, config)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Client{sshClient: sshClient}, nil
+}
+
+func dial(network, addr string, config *ssh.ClientConfig) (*ssh.Client, error) {
+	timeout := config.Timeout
+
+	conn, err := net.DialTimeout(network, addr, timeout)
+	if err != nil {
+		return nil, err
+	}
+	if 0 < timeout {
+		if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+			conn.Close()
+			return nil, err
+		}
+	}
+	c, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		c.Close()
+		return nil, err
+	}
+	return ssh.NewClient(c, chans, reqs), nil
 }
 
 // Close closes the underlying client network connection.
