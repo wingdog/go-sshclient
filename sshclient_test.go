@@ -131,8 +131,13 @@ func TestCmdRun(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	err := cli.Cmd("echo -n stdout").Cmd("echo -n stderr >&2").SetStdio(&stdout, &stderr).Run()
-	assert.NoError(t, err)
+	rs := cli.Cmd("echo -n stdout").Cmd("echo -n stderr >&2").SetStdio(&stdout, &stderr)
+	s, err := rs.NewSession()
+	if nil != err {
+		t.Fatal(err)
+	}
+
+	assert.NoError(t, rs.Run(s))
 
 	assert.Equal(t, "stdout", stdout.String())
 	assert.Equal(t, "stderr", stderr.String())
@@ -151,8 +156,12 @@ func TestScriptRun(t *testing.T) {
   `
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	err := cli.Script(script).SetStdio(&stdout, &stderr).Run()
-	assert.NoError(t, err)
+	rs := cli.Script(script).SetStdio(&stdout, &stderr)
+	s, err := rs.NewSession()
+	if nil != err {
+		t.Fatal(err)
+	}
+	assert.NoError(t, rs.Run(s))
 	assert.Equal(t, "stdout", stdout.String())
 	assert.Equal(t, "stderr", stderr.String())
 }
@@ -174,8 +183,12 @@ echo -n stderr >&2
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cli.ScriptFile(f.Name()).SetStdio(&stdout, &stderr).Run()
-	assert.NoError(t, err)
+	rs := cli.ScriptFile(f.Name()).SetStdio(&stdout, &stderr)
+	s, err := rs.NewSession()
+	if nil != err {
+		t.Fatal(err)
+	}
+	assert.NoError(t, rs.Run(s))
 	assert.Equal(t, "stdout", stdout.String())
 	assert.Equal(t, "stderr", stderr.String())
 }
@@ -186,7 +199,12 @@ func TestClientCmdOutput(t *testing.T) {
 	defer srv.Shutdown(context.Background())
 	defer cli.Close()
 
-	out, err := cli.Cmd("echo -n a").Output()
+	rs := cli.Cmd("echo -n a")
+	s, err := rs.NewSession()
+	if nil != err {
+		t.Fatal(err)
+	}
+	out, err := rs.Output(s)
 	assert.NoError(t, err)
 	assert.Equal(t, "a", string(out))
 }
@@ -197,7 +215,12 @@ func TestClientCmdSmartOutput(t *testing.T) {
 	defer srv.Shutdown(context.Background())
 	defer cli.Close()
 
-	out, err := cli.Cmd("echo -n a && exit 125").SmartOutput()
+	rs := cli.Cmd("echo -n a && exit 125")
+	s, err := rs.NewSession()
+	if nil != err {
+		t.Fatal(err)
+	}
+	out, err := rs.SmartOutput(s)
 	assert.NoError(t, err)
 	assert.Equal(t, "a", string(out))
 }
@@ -233,6 +256,7 @@ func TestClientTerminal(t *testing.T) {
 	}()
 
 	// NOTE: a zero time error exists
+	fmt.Println("111")
 	today := time.Now().Format("20060102")
 	stdin.Write([]byte("date +%Y%m%d\nexit\n"))
 	stdout := bufio.NewReader(stdoutr)

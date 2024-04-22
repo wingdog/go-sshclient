@@ -33,6 +33,7 @@ const (
 type Client struct {
 	sshClient    *ssh.Client
 	sftpSessions sync.Map
+	envs         map[string]string
 }
 
 // DialWithPasswd starts a client connection to the given SSH server with passwd authmethod.
@@ -96,13 +97,20 @@ func DialWithKeyWithPassphrase(addr, user, keyfile string, passphrase string) (*
 
 // Dial starts a client connection to the given SSH server.
 // This wraps ssh.Dial.
-func Dial(network, addr string, config *ssh.ClientConfig) (*Client, error) {
+func Dial(network, addr string, config *ssh.ClientConfig, options ...func(*Client) error) (*Client, error) {
 	sshClient, err := dial(network, addr, config)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Client{sshClient: sshClient}, nil
+	c := &Client{sshClient: sshClient}
+	for _, o := range options {
+		if err := o(c); nil != err {
+			return nil, err
+		}
+	}
+
+	return c, nil
 }
 
 func dial(network, addr string, config *ssh.ClientConfig) (*ssh.Client, error) {
@@ -162,6 +170,13 @@ func (c *Client) Dial(network, addr string, config *ssh.ClientConfig) (*Client, 
 	client := ssh.NewClient(sshConn, chans, reqs)
 
 	return &Client{sshClient: client}, nil
+}
+
+func WithEnvs(envs map[string]string) func(*Client) error {
+	return func(s *Client) error {
+		s.envs = envs
+		return nil
+	}
 }
 
 // DialWithPasswd initiates a Client to the addr from the remote host with passwd authmethod.
@@ -229,6 +244,7 @@ func (c *Client) Cmd(cmd string) *RemoteScript {
 		_type:  cmdLine,
 		client: c.sshClient,
 		script: bytes.NewBufferString(cmd + "\n"),
+		envs:   c.envs,
 	}
 }
 
@@ -260,6 +276,8 @@ type RemoteScript struct {
 
 	stdout io.Writer
 	stderr io.Writer
+
+	envs map[string]string
 }
 
 // Run runs the script on the client.
@@ -267,36 +285,36 @@ type RemoteScript struct {
 // The returned error is nil if the command runs, has no problems
 // copying stdin, stdout, and stderr, and exits with a zero exit
 // status.
-func (rs *RemoteScript) Run() error {
+func (rs *RemoteScript) Run(s *ssh.Session) error {
 	if rs.err != nil {
 		fmt.Println(rs.err) // TODO
 		return rs.err
 	}
 
 	if rs._type == cmdLine {
-		return rs.runCmds()
+		return rs.runCmd(s, rs.script.String())
 	} else if rs._type == rawScript {
-		return rs.runScript()
+		return rs.runScript(s)
 	} else if rs._type == scriptFile {
-		return rs.runScriptFile()
+		return rs.runScriptFile(s)
 	} else {
 		return errors.New("Not supported RemoteScript type")
 	}
 }
 
 // Output runs the script on the client and returns its standard output.
-func (rs *RemoteScript) Output() ([]byte, error) {
+func (rs *RemoteScript) Output(s *ssh.Session) ([]byte, error) {
 	if rs.stdout != nil {
 		return nil, errors.New("Stdout already set")
 	}
 	var out bytes.Buffer
 	rs.stdout = &out
-	err := rs.Run()
+	err := rs.Run(s)
 	return out.Bytes(), err
 }
 
 // SmartOutput runs the script on the client. On success, its standard ouput is returned. On error, its standard error is returned.
-func (rs *RemoteScript) SmartOutput() ([]byte, error) {
+func (rs *RemoteScript) SmartOutput(s *ssh.Session) ([]byte, error) {
 	if rs.stdout != nil {
 		return nil, errors.New("Stdout already set")
 	}
@@ -310,7 +328,7 @@ func (rs *RemoteScript) SmartOutput() ([]byte, error) {
 	)
 	rs.stdout = &stdout
 	rs.stderr = &stderr
-	err := rs.Run()
+	err := rs.Run(s)
 	if err != nil {
 		return stderr.Bytes(), err
 	}
@@ -333,12 +351,18 @@ func (rs *RemoteScript) SetStdio(stdout, stderr io.Writer) *RemoteScript {
 	return rs
 }
 
-func (rs *RemoteScript) runCmd(cmd string) error {
-	session, err := rs.client.NewSession()
-	if err != nil {
-		return err
-	}
+func (rs *RemoteScript) NewSession() (*ssh.Session, error) {
+	return rs.client.NewSession()
+}
+
+func (rs *RemoteScript) runCmd(session *ssh.Session, cmd string) error {
 	defer session.Close()
+
+	for k, v := range rs.envs {
+		if err := session.Setenv(k, v); nil != err {
+			return err
+		}
+	}
 
 	session.Stdout = rs.stdout
 	session.Stderr = rs.stderr
@@ -349,28 +373,29 @@ func (rs *RemoteScript) runCmd(cmd string) error {
 	return nil
 }
 
-func (rs *RemoteScript) runCmds() error {
-	for {
-		statment, err := rs.script.ReadString('\n')
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
+// func (rs *RemoteScript) runCmds() error {
+// 	for {
+// 		statment, err := rs.script.ReadString('\n')
+// 		if err == io.EOF {
+// 			break
+// 		}
+// 		if err != nil {
+// 			return err
+// 		}
+
+// 		if err := rs.runCmd(statment); err != nil {
+// 			return err
+// 		}
+// 	}
+
+// 	return nil
+// }
+
+func (rs *RemoteScript) runScript(session *ssh.Session) error {
+	for k, v := range rs.envs {
+		if err := session.Setenv(k, v); nil != err {
 			return err
 		}
-
-		if err := rs.runCmd(statment); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (rs *RemoteScript) runScript() error {
-	session, err := rs.client.NewSession()
-	if err != nil {
-		return err
 	}
 
 	session.Stdin = rs.script
@@ -387,7 +412,7 @@ func (rs *RemoteScript) runScript() error {
 	return nil
 }
 
-func (rs *RemoteScript) runScriptFile() error {
+func (rs *RemoteScript) runScriptFile(s *ssh.Session) error {
 	var buffer bytes.Buffer
 	file, err := os.Open(rs.scriptFile)
 	if err != nil {
@@ -400,7 +425,7 @@ func (rs *RemoteScript) runScriptFile() error {
 	}
 
 	rs.script = &buffer
-	return rs.runScript()
+	return rs.runScript(s)
 }
 
 // A RemoteShell represents a login shell on the client.
